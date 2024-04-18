@@ -11,14 +11,18 @@ if [ -z "$1" ]; then
 fi
 
 CRBL_TARGET="$1"
-
+if [ -z "$CRBL_HEADLESS" ]; then
+	CRBL_IMAGE_SIZE_GB=5
+else
+	CRBL_IMAGE_SIZE_GB=2
+fi
 if [ -z "$CRBL_INITIALIZE" ]; then
 	if [ ! -e "$CRBL_TARGET" ]; then
 		echo "TARGET $1 does not exist."
 		exit 1
 	fi
 elif [ ! -e "$CRBL_TARGET" ]; then
-	truncate -s 5G $CRBL_TARGET
+	truncate -s ${CRBL_IMAGE_SIZE_GB}G $CRBL_TARGET
 fi
 
 if [ -f "$CRBL_TARGET" ]; then
@@ -44,15 +48,16 @@ CRBL_PART_SIZE_OFFSET=4
 CRBL_PART_SIZE_KERN_A=62
 CRBL_PART_SIZE_KERN_B=62
 CRBL_PART_SIZE_BOOT=$((512-CRBL_PART_SIZE_OFFSET-CRBL_PART_SIZE_KERN_A-CRBL_PART_SIZE_KERN_B))
-CRBL_PART_SIZE_ROOT=$((4*1024+512))
+CRBL_PART_SIZE_ROOT=$(((CRBL_IMAGE_SIZE_GB-1)*1024+512))
 
 CRBL_PART_LABEL_KERN_A="KERN-A"
 CRBL_PART_LABEL_KERN_B="KERN-B"
 CRBL_PART_LABEL_BOOT="BOOT"
 CRBL_PART_LABEL_ROOT="ROOT"
 
-CRBL_PART_MP_ROOT=$PWD/root
-CRBL_PART_MP_BOOT=$PWD/root/boot/EFI
+CRBL_TMP_DIR=$(mktemp -d)
+CRBL_PART_MP_ROOT=$CRBL_TMP_DIR/root
+CRBL_PART_MP_BOOT=$CRBL_PART_MP_BOOT/boot/EFI
 CRBL_DIR_LINUX=$PWD/linux
 CRBL_DIR_LINUX_FW=$PWD/linux-firmware
 
@@ -173,8 +178,8 @@ sudo umount "$CRBL_PART_MP_ROOT/dev"
 
 
 #DEPTHCHARGE
-dd if=/dev/zero of=bootloader.bin bs=512 count=1
-mkdepthcharge -o kernel.img --bootloader bootloader.bin \
+dd if=/dev/zero of="$CRBL_TMP_DIR/bootloader.bin" bs=512 count=1
+mkdepthcharge -o "$CRBL_TMP_DIR/kernel.img" --bootloader "$CRBL_TMP_DIR/bootloader.bin" \
 	--format fit -C "$CRBL_DEPTHCHARGE_COMP" -A "$CRBL_ARCH" \
 	-c "console=tty1 root=PARTUUID=%U/PARTNROFF=3 rootwait ro noresume" -- \
 	"$CRBL_PART_MP_ROOT/boot/vmlinuz-$CRBL_LINUX_VER" \
@@ -196,11 +201,12 @@ mkdepthcharge -o kernel.img --bootloader bootloader.bin \
 	"$CRBL_DIR_LINUX/arch/$CRBL_ARCH/boot/dts/mediatek/mt8195-cherry-tomato-r3.dts" \
 	"$CRBL_DIR_LINUX/arch/$CRBL_ARCH/boot/dts/mediatek/mt8395-genio-1200-evk.dts"
 
-sudo dd if=kernel.img of="$CRBL_TARGET$CRBL_PART_PREFIX$CRBL_PART_KERN_A" bs=1M
+sudo dd if="$CRBL_TMP_DIR/kernel.img" of="$CRBL_TARGET$CRBL_PART_PREFIX$CRBL_PART_KERN_A" bs=1M
 sudo cgpt add -i $CRBL_PART_KERN_A -S 1 -T 0 -P 3 "$CRBL_TARGET"
 
 #FINISH
 sudo umount "$CRBL_PART_MP_ROOT"
+rm -rf "$CRBL_TMP_DIR"
 if [ ! -z "$CRBL_LOOP_DEV" ]; then
 	sudo losetup -d "$CRBL_TARGET"
 fi

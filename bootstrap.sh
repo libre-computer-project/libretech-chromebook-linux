@@ -25,14 +25,13 @@ elif [ ! -e "$CRBL_TARGET" ]; then
 	truncate -s ${CRBL_IMAGE_SIZE_GB}G $CRBL_TARGET
 fi
 
+. traps.sh
+traps_start
+
 if [ -f "$CRBL_TARGET" ]; then
 	CRBL_TARGET=$(sudo losetup --show -f "$CRBL_TARGET")
+	traps_push sudo losetup -d "$CRBL_TARGET"
 	CRBL_LOOP_DEV=1
-fi
-
-if [ ! -w "$CRBL_TARGET" ]; then
-	echo "TARGET $1 is not writable."
-	exit 1
 fi
 
 CRBL_DISTRO=debian
@@ -84,7 +83,13 @@ fi
 DISK_SEC_PER_MB=$((1024*1024/DISK_SEC_SIZE))
 DISK_GPT_SIZE=$((32*1024/DISK_SEC_SIZE))
 
-if [ ! -z "$CRBL_INITIALIZE" ]; then
+if [ -z "$CRBL_INITIALIZE" ]; then
+	if [ -z "$CRBL_PART_ALT_SCAN" ]; then
+		sudo blockdev --rereadpt "$CRBL_TARGET"
+	else
+		sudo partprobe "$CRBL_TARGET"
+	fi
+else
 	sudo cgpt create "$CRBL_TARGET"
 	sudo cgpt add -i $CRBL_PART_KERN_A -b $((CRBL_PART_SIZE_OFFSET*DISK_SEC_PER_MB)) -s $((CRBL_PART_SIZE_KERN_A*DISK_SEC_PER_MB)) -t kernel -l "$CRBL_PART_LABEL_KERN_A" "$CRBL_TARGET"
 	CRBL_PART_SIZE_OFFSET=$((CRBL_PART_SIZE_OFFSET+CRBL_PART_SIZE_KERN_A))
@@ -106,6 +111,8 @@ fi
 #BTRFS ROOT AND BOOT
 mkdir -p "$CRBL_PART_MP_ROOT"
 sudo mount -o noatime,compress=zstd "$CRBL_TARGET$CRBL_PART_PREFIX$CRBL_PART_ROOT" "$CRBL_PART_MP_ROOT"
+traps_push sudo umount "$CRBL_TARGET$CRBL_PART_PREFIX$CRBL_PART_ROOT"
+
 if sudo btrfs subvolume get-default "$CRBL_PART_MP_ROOT" | grep FS_TREE > /dev/null; then
 	sudo btrfs subvolume create "$CRBL_PART_MP_ROOT/@"
 	sudo btrfs subvolume set-default "$CRBL_PART_MP_ROOT/@"
@@ -115,11 +122,11 @@ fi
 
 #DEBOOTSTRAP
 if [ ! -d "$CRBL_PART_MP_ROOT/home" ]; then
-	CRBL_DEB_PACKAGES=eatmydata,btrfs-progs,kbd,keyboard-configuration,locales,initramfs-tools
+	CRBL_DEB_PACKAGES=eatmydata,btrfs-progs,kbd,keyboard-configuration,locales,initramfs-tools,zstd
 	if [ -z "$CRBL_HEADLESS" ]; then
 		CRBL_PACKAGES+=,task-gnome-desktop,gnome-initial-setup
 	fi
-	sudo eatmydata mmdebstrap --components main,contrib,non-free,non-free-firmware --include "$CRBL_DEB_PACKAGES" "$CRBL_DEB_SUITE" "$CRBL_PART_MP_ROOT"
+	sudo eatmydata mmdebstrap --arch=arm64 --components main,contrib,non-free,non-free-firmware --include "$CRBL_DEB_PACKAGES" "$CRBL_DEB_SUITE" "$CRBL_PART_MP_ROOT"
 fi
 
 echo "chromebook-linux" | sudo tee "$CRBL_PART_MP_ROOT/etc/hostname"
@@ -137,8 +144,12 @@ if [ ! -z "$CRBL_HEADLESS" ]; then
 fi
 
 #LINUX
-CRBL_LINUX_VER=$(make -sC "$CRBL_DIR_LINUX" kernelversion)
-if [ -z "$CRBL_LINUX_VER" ]; then
+if [ `uname -m` = "x86_64" ]; then
+	export ARCH=arm64
+	export CROSS_COMPILE=aarch64-linux-gnu-
+fi
+CRBL_LINUX_REL=$(make -sC "$CRBL_DIR_LINUX" kernelrelease)
+if [ -z "$CRBL_LINUX_REL" ]; then
 	echo "LINUX VERSION ERROR!"
 	exit 1
 fi
@@ -146,18 +157,19 @@ fi
 if [ -z "$LINUX_MENUCONFIG" ]; then
 	make -C "$CRBL_DIR_LINUX" defconfig
 else
+	make -C "$CRBL_DIR_LINUX" defconfig
 	make -C "$CRBL_DIR_LINUX" menuconfig
 	make -C "$CRBL_DIR_LINUX" savedefconfig
 	mv "$CRBL_DIR_LINUX/defconfig" "$CRBL_DIR_LINUX/arch/$CRBL_ARCH/configs/defconfig"
 fi
 
 if [ -z "$LINUX_MAKE_SKIP" ]; then
-	sudo eatmydata make -C "$CRBL_DIR_LINUX" -j`nproc --all`
+	eatmydata make -C "$CRBL_DIR_LINUX" -j`nproc --all`
 fi
 if [ -z "$LINUX_INSTALL_SKIP" ]; then
-	sudo eatmydata make -C "$CRBL_DIR_LINUX" install INSTALL_PATH="$CRBL_PART_MP_ROOT/boot"
-	sudo eatmydata make -C "$CRBL_DIR_LINUX" modules_install INSTALL_MOD_PATH="$CRBL_PART_MP_ROOT"
-	sudo eatmydata make -C "$CRBL_DIR_LINUX" headers_install INSTALL_HDR_PATH="$CRBL_PART_MP_ROOT/usr"
+	sudo -E eatmydata make -C "$CRBL_DIR_LINUX" install INSTALL_PATH="$CRBL_PART_MP_ROOT/boot"
+	sudo -E eatmydata make -C "$CRBL_DIR_LINUX" modules_install INSTALL_MOD_PATH="$CRBL_PART_MP_ROOT"
+	sudo -E eatmydata make -C "$CRBL_DIR_LINUX" headers_install INSTALL_HDR_PATH="$CRBL_PART_MP_ROOT/usr"
 fi
 
 #LINUX FIRMWARE
@@ -167,23 +179,26 @@ fi
 
 #INITRAMFS
 sudo mount -o bind /dev "$CRBL_PART_MP_ROOT/dev"
+traps_push sudo umount "$CRBL_PART_MP_ROOT/dev"
 sudo mount -o bind /dev/pts "$CRBL_PART_MP_ROOT/dev/pts"
+traps_push sudo umount "$CRBL_PART_MP_ROOT/dev/pts"
 sudo chroot "$CRBL_PART_MP_ROOT" mount -t proc proc /proc
+traps_push sudo chroot "$CRBL_PART_MP_ROOT" umount /proc
 sudo chroot "$CRBL_PART_MP_ROOT" mount -t sysfs sys /sys
-sudo chroot "$CRBL_PART_MP_ROOT" update-initramfs -c -k "$CRBL_LINUX_VER"
-sudo chroot "$CRBL_PART_MP_ROOT" umount /sys
-sudo chroot "$CRBL_PART_MP_ROOT" umount /proc
-sudo umount "$CRBL_PART_MP_ROOT/dev/pts"
-sudo umount "$CRBL_PART_MP_ROOT/dev"
-
+traps_push sudo chroot "$CRBL_PART_MP_ROOT" umount /sys
+sudo chroot "$CRBL_PART_MP_ROOT" update-initramfs -c -k "$CRBL_LINUX_REL"
+traps_pop
+traps_pop
+traps_pop
+traps_pop
 
 #DEPTHCHARGE
 dd if=/dev/zero of="$CRBL_TMP_DIR/bootloader.bin" bs=512 count=1
 mkdepthcharge -o "$CRBL_TMP_DIR/kernel.img" --bootloader "$CRBL_TMP_DIR/bootloader.bin" \
 	--format fit -C "$CRBL_DEPTHCHARGE_COMP" -A "$CRBL_ARCH" \
 	-c "console=tty1 root=PARTUUID=%U/PARTNROFF=3 rootwait ro noresume" -- \
-	"$CRBL_PART_MP_ROOT/boot/vmlinuz-$CRBL_LINUX_VER" \
-	"$CRBL_PART_MP_ROOT/boot/initrd.img-$CRBL_LINUX_VER" \
+	"$CRBL_PART_MP_ROOT/boot/vmlinuz-$CRBL_LINUX_REL" \
+	"$CRBL_PART_MP_ROOT/boot/initrd.img-$CRBL_LINUX_REL" \
 	"$CRBL_DIR_LINUX/arch/$CRBL_ARCH/boot/dts/mediatek/mt8183-evb.dts" \
 	"$CRBL_DIR_LINUX/arch/$CRBL_ARCH/boot/dts/mediatek/mt8183-kukui-jacuzzi-fennel14.dtb" \
 	"$CRBL_DIR_LINUX/arch/$CRBL_ARCH/boot/dts/mediatek/mt8183-kukui-jacuzzi-fennel14-sku2.dtb" \
@@ -205,8 +220,9 @@ sudo dd if="$CRBL_TMP_DIR/kernel.img" of="$CRBL_TARGET$CRBL_PART_PREFIX$CRBL_PAR
 sudo cgpt add -i $CRBL_PART_KERN_A -S 1 -T 0 -P 3 "$CRBL_TARGET"
 
 #FINISH
-sudo umount "$CRBL_PART_MP_ROOT"
+traps_pop #sudo umount "$CRBL_PART_MP_ROOT"
 rm -rf "$CRBL_TMP_DIR"
 if [ ! -z "$CRBL_LOOP_DEV" ]; then
-	sudo losetup -d "$CRBL_TARGET"
+	traps_pop #sudo losetup -d "$CRBL_TARGET"
 fi
+traps_stop

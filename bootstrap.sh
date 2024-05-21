@@ -68,6 +68,7 @@ CRBL_PART_PREFIX=
 CRBL_PART_ALT_SCAN=
 if [ "${CRBL_TARGET:5:6}" = "mmcblk" ]; then
 	CRBL_PART_PREFIX=p
+	CRBL_PART_ALT_SCAN=1
 elif [ "${CRBL_TARGET:5:4}" = "nvme" ]; then
 	CRBL_PART_PREFIX=p
 elif [ "${CRBL_TARGET:5:4}" = "loop" ]; then
@@ -129,18 +130,20 @@ if [ ! -d "$CRBL_PART_MP_ROOT/home" ]; then
 	sudo eatmydata mmdebstrap --arch=arm64 --components main,contrib,non-free,non-free-firmware --include "$CRBL_DEB_PACKAGES" "$CRBL_DEB_SUITE" "$CRBL_PART_MP_ROOT"
 fi
 
-echo "chromebook-linux" | sudo tee "$CRBL_PART_MP_ROOT/etc/hostname"
-echo "LABEL=$CRBL_PART_LABEL_ROOT / btrfs defaults,ssd,compress=zstd,noatime 0 0" | sudo tee "$CRBL_PART_MP_ROOT/etc/fstab"
-echo "LABEL=$CRBL_PART_LABEL_BOOT /boot/efi vfat defaults,noatime 0 1" | sudo tee -a "$CRBL_PART_MP_ROOT/etc/fstab"
+if [ -z "$CRBL_UPDATE_EXISTING" ]; then
+	echo "chromebook-linux" | sudo tee "$CRBL_PART_MP_ROOT/etc/hostname"
+	echo "LABEL=$CRBL_PART_LABEL_ROOT / btrfs defaults,ssd,compress=zstd,noatime 0 0" | sudo tee "$CRBL_PART_MP_ROOT/etc/fstab"
+	echo "LABEL=$CRBL_PART_LABEL_BOOT /boot/efi vfat defaults,noatime 0 1" | sudo tee -a "$CRBL_PART_MP_ROOT/etc/fstab"
 
-#cat "$CRBL_DISTRO/apt/$CRBL_DEB_SUITE/sources.list" | sudo tee "$CRBL_PART_MP_ROOT/etc/apt/sources.list"
-sudo sed -i "s/^XKBMODEL=\".*\"/XKBMODEL=\"chromebook\"/" "$CRBL_PART_MP_ROOT/etc/default/keyboard"
-sudo sed -i "s/\(# \)\\?en_US.UTF-8/en_US.UTF-8/" "$CRBL_PART_MP_ROOT/etc/locale.gen"
-sudo chroot "$CRBL_PART_MP_ROOT" locale-gen
+	#cat "$CRBL_DISTRO/apt/$CRBL_DEB_SUITE/sources.list" | sudo tee "$CRBL_PART_MP_ROOT/etc/apt/sources.list"
+	sudo sed -i "s/^XKBMODEL=\".*\"/XKBMODEL=\"chromebook\"/" "$CRBL_PART_MP_ROOT/etc/default/keyboard"
+	sudo sed -i "s/\(# \)\\?en_US.UTF-8/en_US.UTF-8/" "$CRBL_PART_MP_ROOT/etc/locale.gen"
+	sudo chroot "$CRBL_PART_MP_ROOT" locale-gen
 
-if [ ! -z "$CRBL_HEADLESS" ]; then
-	echo "root:root" | sudo chroot "$CRBL_PART_MP_ROOT" chpasswd
-	sudo chroot "$CRBL_PART_MP_ROOT" passwd -e root
+	if [ ! -z "$CRBL_HEADLESS" ]; then
+		echo "root:root" | sudo chroot "$CRBL_PART_MP_ROOT" chpasswd
+		sudo chroot "$CRBL_PART_MP_ROOT" passwd -e root
+	fi
 fi
 
 #LINUX
@@ -148,19 +151,21 @@ if [ `uname -m` = "x86_64" ]; then
 	export ARCH=arm64
 	export CROSS_COMPILE=aarch64-linux-gnu-
 fi
-CRBL_LINUX_REL=$(make -sC "$CRBL_DIR_LINUX" kernelrelease)
-if [ -z "$CRBL_LINUX_REL" ]; then
-	echo "LINUX VERSION ERROR!"
-	exit 1
-fi
 
 if [ -z "$LINUX_MENUCONFIG" ]; then
 	make -C "$CRBL_DIR_LINUX" defconfig
 else
+	make -C "$CRBL_DIR_LINUX" oldconfig
 	make -C "$CRBL_DIR_LINUX" defconfig
 	make -C "$CRBL_DIR_LINUX" menuconfig
 	make -C "$CRBL_DIR_LINUX" savedefconfig
 	mv "$CRBL_DIR_LINUX/defconfig" "$CRBL_DIR_LINUX/arch/$CRBL_ARCH/configs/defconfig"
+fi
+
+CRBL_LINUX_REL=$(make -sC "$CRBL_DIR_LINUX" kernelrelease)
+if [ -z "$CRBL_LINUX_REL" ]; then
+	echo "LINUX VERSION ERROR!"
+	exit 1
 fi
 
 if [ -z "$LINUX_MAKE_SKIP" ]; then
